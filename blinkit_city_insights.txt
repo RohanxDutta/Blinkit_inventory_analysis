@@ -1,0 +1,184 @@
+CREATE TABLE all_blinkit_category_scraping_stream (
+    created_at TIMESTAMP,
+    l1_category_id INT,
+    l2_category_id INT,
+    store_id INT,
+    sku_id INT,
+    sku_name TEXT,
+    selling_price NUMERIC,
+    mrp NUMERIC,
+    inventory INT,
+    image_url TEXT,
+    brand_id INT,
+    brand TEXT,
+    unit TEXT
+);
+
+CREATE TABLE blinkit_categories (
+    l1_category TEXT,
+	l1_category_id INT,
+	l2_category TEXT,
+    l2_category_id INT
+);
+
+
+INSERT INTO blinkit_categories (l1_category_id, l1_category, l2_category_id, l2_category)
+VALUES
+(1237, 'Munchies', 1178, 'Bhujia & Mixtures'),
+(1238, 'Munchies', 80, 'Papad & Fryums');
+
+
+Select * from blinkit_categories;
+
+
+UPDATE blinkit_categories
+SET l1_category_id = 1237
+WHERE l1_category_id = 1238
+
+
+CREATE TABLE blinkit_city_map (
+    store_id INT,
+    city_name TEXT
+);
+
+
+SELECT * from blinkit_city_map LIMIT 10;
+
+
+
+CREATE TABLE blinkit_city_insights (
+    date DATE,
+    brand_id INTEGER,
+    brand TEXT,
+    image_url TEXT,
+    city_name TEXT,
+    sku_id INTEGER,
+    sku_name TEXT,
+    category_id INTEGER,
+    category_name TEXT,
+    sub_category_id INTEGER,
+    sub_category_name TEXT,
+    est_qty_sold INTEGER,
+    est_sales_sp NUMERIC,
+    est_sales_mrp NUMERIC,
+    listed_ds_count INTEGER,
+    ds_count INTEGER,
+    wt_osa NUMERIC,
+    wt_osa_ls NUMERIC,
+    mrp NUMERIC,
+    sp NUMERIC,
+    discount NUMERIC,
+    
+    PRIMARY KEY (date, sku_id, city_name)
+);
+
+
+DROP TABLE IF EXISTS blinkit_city_insights;
+
+CREATE TABLE blinkit_city_insights (
+    date DATE,
+    brand_id INTEGER,
+    brand TEXT,
+    image_url TEXT,
+    city_name TEXT,
+    sku_id INTEGER,
+    sku_name TEXT,
+    category_id INTEGER,
+    category_name TEXT,
+    sub_category_id INTEGER,
+    sub_category_name TEXT,
+    est_qty_sold INTEGER,
+    est_sales_sp NUMERIC,
+    est_sales_mrp NUMERIC,
+    listed_ds_count INTEGER,
+    ds_count INTEGER,
+    wt_osa NUMERIC,
+    wt_osa_ls NUMERIC,
+    mrp NUMERIC,
+    sp NUMERIC,
+    discount NUMERIC,
+    PRIMARY KEY (date, sku_id, city_name)
+);
+
+-- Insert transformed data
+INSERT INTO blinkit_city_insights
+WITH inventory_diff AS (
+    SELECT 
+        a.created_at::date AS date,
+        a.sku_id,
+        c.city_name,
+        a.store_id,
+        a.inventory AS current_inventory,
+        LEAD(a.inventory) OVER (PARTITION BY a.store_id, a.sku_id ORDER BY a.created_at) AS next_inventory,
+        a.selling_price,
+        a.mrp,
+        a.brand_id,
+        a.brand,
+        a.image_url,
+        a.sku_name,
+        a.l1_category_id,
+        a.l2_category_id
+    FROM all_blinkit_category_scraping_stream a
+    JOIN blinkit_city_map c ON a.store_id = c.store_id
+),
+
+estimates AS (
+    SELECT *,
+        CASE 
+            WHEN next_inventory IS NOT NULL AND next_inventory < current_inventory THEN current_inventory - next_inventory
+            ELSE 0
+        END AS est_qty_sold,
+        CASE WHEN current_inventory > 0 THEN 1 ELSE 0 END AS is_in_stock
+    FROM inventory_diff
+),
+
+final_agg AS (
+    SELECT
+        date,
+        sku_id,
+        city_name,
+        MAX(brand_id) AS brand_id,
+        MAX(brand) AS brand,
+        MAX(image_url) AS image_url,
+        MAX(sku_name) AS sku_name,
+        MAX(selling_price) AS sp,
+        MAX(mrp) AS mrp,
+        MAX(l1_category_id) AS category_id,
+        MAX(l2_category_id) AS sub_category_id,
+        SUM(est_qty_sold) AS est_qty_sold,
+        SUM(est_qty_sold * selling_price) AS est_sales_sp,
+        SUM(est_qty_sold * mrp) AS est_sales_mrp,
+        COUNT(DISTINCT store_id) AS listed_ds_count,
+        SUM(is_in_stock) AS in_stock_stores
+    FROM estimates
+    GROUP BY date, sku_id, city_name
+)
+
+SELECT
+    f.date,
+    f.brand_id,
+    f.brand,
+    f.image_url,
+    f.city_name,
+    f.sku_id,
+    f.sku_name,
+    f.category_id,
+    b.l1_category AS category_name,
+    f.sub_category_id,
+    b.l2_category AS sub_category_name,
+    f.est_qty_sold,
+    f.est_sales_sp,
+    f.est_sales_mrp,
+    f.listed_ds_count,
+    (SELECT COUNT(DISTINCT store_id) FROM all_blinkit_category_scraping_stream) AS ds_count,
+    ROUND(f.in_stock_stores * 1.0 / NULLIF((SELECT COUNT(DISTINCT store_id) FROM all_blinkit_category_scraping_stream), 0), 2) AS wt_osa,
+    ROUND(f.in_stock_stores * 1.0 / NULLIF(f.listed_ds_count, 0), 2) AS wt_osa_ls,
+    f.mrp,
+    f.sp,
+    ROUND((f.mrp - f.sp) / NULLIF(f.mrp, 0), 2) AS discount
+FROM final_agg f
+LEFT JOIN blinkit_categories b
+  ON f.category_id = b.l1_category_id AND f.sub_category_id = b.l2_category_id;
+
+
+Select * from blinkit_city_insights;
